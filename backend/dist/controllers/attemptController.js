@@ -2,7 +2,7 @@ import { createHash, randomInt, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { answerMutationSchema, attemptView, flagMutationSchema, startAttemptSchema, submitSchema } from '../models/attempt.js';
 import { AttemptNotFound } from '../repositories/attemptRepository.js';
-export function createAttemptController(repository, questions) {
+export function createAttemptController(repository, questions, practice) {
     const owner = (res) => res.locals.student.email;
     const expire = (attempt, now) => {
         if (attempt.status === 'active' && now >= attempt.deadline) {
@@ -92,20 +92,25 @@ export function createAttemptController(repository, questions) {
             expire(attempt, now);
             return attempt;
         })));
-        const seen = new Set();
-        const items = [];
-        for (const attempt of attempts.filter(value => value.status === 'submitted').sort((a, b) => (b.submittedAt ?? 0) - (a.submittedAt ?? 0))) {
+        const candidates = (await practice.list(owner(res))).map(answer => ({ questionId: answer.questionId, chapter: answer.chapter, stem: answer.stem, attemptId: null, submittedAt: answer.answeredAt, isCorrect: answer.isCorrect }));
+        for (const attempt of attempts.filter(value => value.status === 'submitted')) {
             if (attempt.submittedAt === null)
                 continue;
             for (const question of attempt.questions) {
                 const answer = attempt.answers[question.id];
-                if (answer === undefined || seen.has(question.id))
+                if (answer === undefined)
                     continue;
-                seen.add(question.id);
-                if (answer !== question.correct)
-                    items.push({ questionId: question.id, chapter: question.chapter, stem: question.stem, attemptId: attempt.id, submittedAt: attempt.submittedAt });
+                candidates.push({ questionId: question.id, chapter: question.chapter, stem: question.stem, attemptId: attempt.id, submittedAt: attempt.submittedAt, isCorrect: answer === question.correct });
             }
         }
+        candidates.sort((a, b) => b.submittedAt - a.submittedAt || Number(a.isCorrect) - Number(b.isCorrect));
+        const seen = new Set();
+        const items = candidates.filter(item => {
+            if (seen.has(item.questionId))
+                return false;
+            seen.add(item.questionId);
+            return !item.isCorrect;
+        }).map(({ isCorrect: _isCorrect, ...item }) => item);
         res.json(items);
     };
     const answer = async (req, res) => {

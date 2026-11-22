@@ -17,7 +17,7 @@ test('signs in, answers a question and clears an expired session', async () => {
     ok: status < 400, status, json: async () => data,
   } as Response);
   const fetchMock = jest.spyOn(globalThis, 'fetch')
-    .mockResolvedValueOnce(response({ message: 'Demo OTP created.', demoOtp: '123456' }))
+    .mockResolvedValueOnce(response({ message: 'Your verification code is available in the server console.' }))
     .mockResolvedValueOnce(response({ token: 'token', user: { email: 'student@example.com' }, expiresAt: 123 }))
     .mockResolvedValueOnce(response([{ name: 'Anatomy', questionCount: 1 }]))
     .mockResolvedValueOnce(response([{ id: 'q1', version: 1, chapter: 'Anatomy', stem: 'Question?', options: ['A', 'B', 'C', 'D'] }]))

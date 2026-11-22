@@ -16,6 +16,9 @@ The checked-in code is a smaller practice/question-bank application, not yet the
 - The backend currently exposes health, admin login, question CRUD/list/import/report review, practice question listing/answering, and question reports.
 - The backend uses PostgreSQL for all application data. Versioned SQL migrations create the question/report, hero, study-plan, custom-attempt and flashcard tables; legacy data transfer is not automatic.
 - The current source includes development-only dummy email OTP flows and email-only student account records; it does not yet include real email verification, production sessions, staff roles, commerce, mock scheduling, or the other target product areas.
+- The requested account-deletion behavior is automatic soft deletion with all records retained. The development prototype blocks deleted accounts from sign-in and existing sessions; export, restoration, audit, production identity, and a complete privacy policy remain unresolved.
+- The requested eventual sign-in direction is Nodemailer with Gmail SMTP for email OTP, and a shared admin account using password plus email OTP. For now a development-only service logs generated codes to the backend console; Gmail delivery is not implemented. Shared admin access differs from the original named-staff requirement and cannot provide individual accountability or role-based permissions.
+- The requested browser-session direction is separate same-origin API proxies and HttpOnly cookies for the student and admin deployments, with a separate native token flow. These are not implemented yet.
 
 Treat the documents as the target specification and the source tree as the current implementation baseline. Do not infer that a screen or target architecture is already implemented because it appears in the specifications. Confirm the PostgreSQL deployment, backup and recovery approach before production use.
 
@@ -146,7 +149,7 @@ For each applicable task:
 
 - [ ] **EX-4.1 — Screen 14: Dashboard.** Compose access status, continue-reading, upcoming mocks, due cards, recent results, and study tasks; test empty/new-account and partial-service states.
 - [ ] **EX-4.2 — Screen 15: Chapter library.** A searchable list of chapters with published practice questions and chapter-filtered practice is available. Paper/topic filters, notes, progress, access states, pagination, and filter reset remain outstanding.
-- [ ] **EX-4.3 — Screen 16: Chapter reader.** Render sanitized versioned notes/diagrams, stable anchors, progress checkpoints, highlights, saved sections, and tutor entry; handle retired anchors.
+- [ ] **EX-4.3 — Screen 16: Chapter reader.** An opt-in development slice supports versioned plain-text sections, stable anchors and a last-read checkpoint, including retired-section handling. Diagrams, highlights, saved sections, tutor entry, entitlements, production authorization and real PostgreSQL concurrency verification remain.
 - [ ] **EX-4.4 — Protect paid content delivery.** Verify entitlements for every request, use approved authorized delivery, watermark safely, and test expired grants and unauthorized direct URLs.
 - [ ] **EX-4.5 — Screen 17: Practice question.** Implement answer selection, explicit tutor-mode reveal, explanations, flags, report flow, and distinction between pending and server-acknowledged state.
 - [ ] **EX-4.6 — Question version behavior.** Freeze question revisions used by a practice/mock attempt; test edits made after attempt start and preserve immutable report context.

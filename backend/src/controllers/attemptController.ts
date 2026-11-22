@@ -5,8 +5,9 @@ import { answerMutationSchema, attemptView, flagMutationSchema, startAttemptSche
 import type { Attempt } from '../models/attempt.js'
 import { AttemptNotFound, createAttemptRepository } from '../repositories/attemptRepository.js'
 import { createQuestionService } from '../services/questionService.js'
+import { createPracticeRepository } from '../repositories/practiceRepository.js'
 
-export function createAttemptController(repository: ReturnType<typeof createAttemptRepository>, questions: ReturnType<typeof createQuestionService>) {
+export function createAttemptController(repository: ReturnType<typeof createAttemptRepository>, questions: ReturnType<typeof createQuestionService>, practice: ReturnType<typeof createPracticeRepository>) {
   const owner = (res: Parameters<RequestHandler>[1]) => (res.locals.student as { email: string }).email
   const expire = (attempt: Attempt, now: number) => {
     if (attempt.status === 'active' && now >= attempt.deadline) {
@@ -75,17 +76,23 @@ export function createAttemptController(repository: ReturnType<typeof createAtte
       expire(attempt, now)
       return attempt
     })))
-    const seen = new Set<string>()
-    const items: { questionId: string; chapter: string; stem: string; attemptId: string; submittedAt: number }[] = []
-    for (const attempt of attempts.filter(value => value.status === 'submitted').sort((a, b) => (b.submittedAt ?? 0) - (a.submittedAt ?? 0))) {
+    const candidates: { questionId: string; chapter: string; stem: string; attemptId: string | null; submittedAt: number; isCorrect: boolean }[] =
+      (await practice.list(owner(res))).map(answer => ({ questionId: answer.questionId, chapter: answer.chapter, stem: answer.stem, attemptId: null, submittedAt: answer.answeredAt, isCorrect: answer.isCorrect }))
+    for (const attempt of attempts.filter(value => value.status === 'submitted')) {
       if (attempt.submittedAt === null) continue
       for (const question of attempt.questions) {
         const answer = attempt.answers[question.id]
-        if (answer === undefined || seen.has(question.id)) continue
-        seen.add(question.id)
-        if (answer !== question.correct) items.push({ questionId: question.id, chapter: question.chapter, stem: question.stem, attemptId: attempt.id, submittedAt: attempt.submittedAt })
+        if (answer === undefined) continue
+        candidates.push({ questionId: question.id, chapter: question.chapter, stem: question.stem, attemptId: attempt.id, submittedAt: attempt.submittedAt, isCorrect: answer === question.correct })
       }
     }
+    candidates.sort((a, b) => b.submittedAt - a.submittedAt || Number(a.isCorrect) - Number(b.isCorrect))
+    const seen = new Set<string>()
+    const items = candidates.filter(item => {
+      if (seen.has(item.questionId)) return false
+      seen.add(item.questionId)
+      return !item.isCorrect
+    }).map(({ isCorrect: _isCorrect, ...item }) => item)
     res.json(items)
   }
   const answer: RequestHandler = async (req, res) => {

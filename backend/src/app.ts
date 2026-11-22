@@ -3,6 +3,7 @@ import cors from "cors";
 import helmet from "helmet";
 import type { Pool } from "pg";
 import { createApiRouter } from "./routes/api.js";
+import type { VerificationEmailService } from "./services/verificationEmail.js";
 
 export function createApp(config: {
   adminPassword: string;
@@ -11,6 +12,8 @@ export function createApp(config: {
   adminEmail?: string;
   origin?: string;
   dummyOtpEnabled?: boolean;
+  chapterNotesEnabled?: boolean;
+  verificationEmail?: VerificationEmailService;
 }) {
   const app = express();
   app.disable("x-powered-by");

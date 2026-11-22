@@ -23,7 +23,6 @@ function App() {
   const [origin, setOrigin] = useState(__DEV__ ? 'http://10.0.2.2:4000' : '');
   const [email, setEmail] = useState('');
   const [code, setCode] = useState('');
-  const [demoOtp, setDemoOtp] = useState('');
   const [session, setSession] = useState<Session>();
   const [screen, setScreen] = useState<Screen>('login');
   const [chapters, setChapters] = useState<Chapter[]>([]);
@@ -39,7 +38,7 @@ function App() {
 
   function clearSession() {
     setSession(undefined); setQuestions([]); setFeedback(undefined);
-    setSelected(undefined); setCode(''); setDemoOtp(''); setScreen('login');
+    setSelected(undefined); setCode(''); setScreen('login');
   }
 
   useEffect(() => {
@@ -69,14 +68,14 @@ function App() {
   const api = createApi(origin, session?.token);
   function requestCode() {
     return run(async () => {
-      const result = await api<{ message: string; demoOtp?: string }>('/auth/otp/request', 'POST', { email });
-      setDemoOtp(result.demoOtp ?? ''); setMessage(result.message);
+      const result = await api<{ message: string }>('/auth/otp/request', 'POST', { email });
+      setMessage(result.message);
     });
   }
   function signIn() {
     return run(async () => {
       const result = await api<Session>('/auth/otp/verify', 'POST', { email, code });
-      setSession(result); setCode(''); setDemoOtp(''); setScreen('chapters');
+      setSession(result); setCode(''); setScreen('chapters');
       try {
         setChapters(await createApi(origin, result.token)<Chapter[]>('/public/chapters'));
       } catch (e) {
@@ -126,13 +125,12 @@ function App() {
           <Text style={styles.brand}>ROYALPREP</Text>
           {screen === 'login' && <>
             <Text style={styles.title}>Student sign in</Text>
-            <Text style={styles.muted}>Development demo only. Any six-digit code works; no email is sent. Your account is created on first sign-in. Your session ends when the app closes.</Text>
+            <Text style={styles.muted}>Request a verification code to sign in or create your account. Your session ends when the app closes.</Text>
             <Text style={styles.label}>Backend origin</Text>
-            <TextInput accessibilityLabel="Backend origin" style={styles.input} value={origin} onChangeText={value => { setOrigin(value); setDemoOtp(''); setCode(''); }} autoCapitalize="none" autoCorrect={false} keyboardType="url" editable={!busy} />
+            <TextInput accessibilityLabel="Backend origin" style={styles.input} value={origin} onChangeText={value => { setOrigin(value); setCode(''); setMessage(''); }} autoCapitalize="none" autoCorrect={false} keyboardType="url" editable={!busy} />
             <Text style={styles.label}>Email</Text>
-            <TextInput accessibilityLabel="Email" style={styles.input} value={email} onChangeText={value => { setEmail(value); setDemoOtp(''); setCode(''); }} autoCapitalize="none" autoCorrect={false} keyboardType="email-address" editable={!busy} />
+            <TextInput accessibilityLabel="Email" style={styles.input} value={email} onChangeText={value => { setEmail(value); setCode(''); setMessage(''); }} autoCapitalize="none" autoCorrect={false} keyboardType="email-address" editable={!busy} />
             <Button title="Request code" disabled={busy || !email.trim()} onPress={requestCode} />
-            {demoOtp ? <Text style={styles.notice}>Demo code: {demoOtp}</Text> : null}
             <Text style={styles.label}>Six-digit code</Text>
             <TextInput accessibilityLabel="Six-digit code" style={styles.input} value={code} onChangeText={setCode} keyboardType="number-pad" maxLength={6} editable={!busy} />
             <Button title="Sign in" disabled={busy || !email.trim() || code.length !== 6} onPress={signIn} />

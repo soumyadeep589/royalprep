@@ -26,7 +26,7 @@ Admin routes are relative to the admin deployment.
 | 10 | Free tool daily 5-question quiz | /tools/daily-quiz | Five common questions per date, one scored submission per account, explanations and completion. |
 | 11 | Free tool flashcards | /tools/flashcards | Browse free cards, flip and record recall ratings when signed in. |
 | 12 | Free tool 2027 exam dates | /exam-dates | Admin-verified sittings, application deadlines, fees, timezone and source; year is data. |
-| 13 | Sign up Log in | /sign-in | Email OTP registration/login with resend limits, expiry, session restoration and safe return navigation. Local development uses a returned demo code; production OTP delivery requires a configured provider. |
+| 13 | Sign up Log in | /sign-in | Email OTP registration/login with resend limits, expiry, session restoration and safe return navigation. Local development logs a code on the backend console; production OTP delivery requires a configured provider. |
 | 14 | Dashboard | /app | Access, continue reading, upcoming mocks, due cards, recent results and study tasks. |
 | 15 | Chapter library | /app/chapters | Paper/topic filters, progress, search and access status. |
 | 16 | Reading a chapter | /app/chapters/:id | Protected notes/diagrams, anchors, progress, highlights, saved sections and tutor. |

@@ -1,0 +1,18 @@
+.mocks-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+.attempt-list { list-style: none; padding: 0; display: grid; gap: 12px; }
+.attempt-list li { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+.attempt-list p { margin: 4px 0; }
+.mock-builder { margin-top: 20px; max-width: 800px; }
+.mock-builder fieldset { border: 0; padding: 0; }
+.mock-builder legend { font-weight: 700; }
+.mock-builder-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.mock-status { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; font-weight: 700; }
+.mock-layout { display: grid; grid-template-columns: minmax(0, 1fr) 220px; gap: 16px; align-items: start; }
+.mock-layout fieldset { border: 0; margin: 0 0 16px; padding: 0; }
+.mock-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.mock-controls { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 20px; }
+.mock-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; }
+.mock-grid button { min-height: 38px; border: 1px solid #e8dfca; border-radius: 6px; background: white; }
+.mock-grid button.active { background: #111d37; color: white; }
+.mock-review { display: grid; gap: 12px; margin-top: 16px; }
+@media (max-width: 700px) { .mock-layout, .mock-builder-fields { grid-template-columns: 1fr; } }

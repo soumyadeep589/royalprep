@@ -1,5 +1,6 @@
 import 'dotenv/config'
 import { z } from 'zod'
+import { createInterface } from 'node:readline/promises'
 import { questionInputSchema } from '../src/models/question.js'
 import { seedQuestions } from './questions.js'
 
@@ -16,11 +17,17 @@ async function request(path: string, init?: RequestInit): Promise<unknown> {
 }
 
 for (const question of seedQuestions) questionInputSchema.parse(question)
+if (!process.stdin.isTTY) throw new Error('Run the seed script in an interactive terminal to enter the verification code.')
 const challenge = z.object({ challenge: z.string() }).parse(await request('/admin/otp/request', {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }),
 }))
+const input = createInterface({ input: process.stdin, output: process.stdout })
+let code: string
+try { code = await input.question('Enter the verification code from the backend console: ') }
+finally { input.close() }
+if (!/^\d{6}$/.test(code)) throw new Error('Enter a six-digit verification code.')
 const login = z.object({ token: z.string() }).parse(await request('/admin/login', {
-  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ challenge: challenge.challenge, code: '123456' }),
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ challenge: challenge.challenge, code }),
 }))
 const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${login.token}` }
 const existing = z.array(z.object({ chapter: z.string(), stem: z.string() })).parse(await request('/admin/questions', { headers }))

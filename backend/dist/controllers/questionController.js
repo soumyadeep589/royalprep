@@ -2,9 +2,10 @@ import { z } from 'zod';
 import { questionInputSchema } from '../models/question.js';
 import { id } from '../services/questionService.js';
 import { parseQuestionCsv } from '../services/csvImport.js';
+import { PracticeConflict, PracticeNotFound } from '../repositories/practiceRepository.js';
 const answerInput = z.object({ version: z.number().int().positive(), option: z.number().int().min(0).max(3) });
 const reportInput = z.object({ version: z.number().int().positive(), message: z.string().trim().min(1).max(500) });
-export function createQuestionController(service) {
+export function createQuestionController(service, practice) {
     const listChapters = async (_req, res) => {
         const questions = await service.listQuestions(true);
         const counts = new Map();
@@ -28,6 +29,10 @@ export function createQuestionController(service) {
         })));
     };
     const listQuestions = async (_req, res) => { res.json(await service.listQuestions()); };
+    const practiceAnswers = async (_req, res) => {
+        const { email } = res.locals.student;
+        res.json(await practice.list(email));
+    };
     const listReports = async (_req, res) => { res.json(await service.listReports()); };
     const create = async (req, res) => {
         const parsed = questionInputSchema.safeParse(req.body);
@@ -78,16 +83,21 @@ export function createQuestionController(service) {
             res.status(422).json({ error: 'Invalid practice answer.' });
             return;
         }
-        const question = await service.readQuestion(String(req.params.id));
-        if (!question?.published) {
-            res.status(404).json({ error: 'Question not found.' });
-            return;
+        const { email } = res.locals.student;
+        try {
+            res.set('Cache-Control', 'no-store').json(await practice.answer(email, String(req.params.id), parsed.data.version, parsed.data.option));
         }
-        if (question.version !== parsed.data.version) {
-            res.status(409).json({ error: 'Question changed; reload practice.' });
-            return;
+        catch (error) {
+            if (error instanceof PracticeNotFound) {
+                res.status(404).json({ error: 'Question not found.' });
+                return;
+            }
+            if (error instanceof PracticeConflict) {
+                res.status(409).json({ error: 'Question changed; reload practice.' });
+                return;
+            }
+            throw error;
         }
-        res.set('Cache-Control', 'no-store').json({ correct: question.correct, explanation: question.explanation, isCorrect: question.correct === parsed.data.option });
     };
     const report = async (req, res) => {
         const parsed = reportInput.safeParse(req.body);
@@ -107,5 +117,5 @@ export function createQuestionController(service) {
         await service.createReport({ id: id(), questionId: question.id, questionVersion: question.version, questionStem: question.stem, message: parsed.data.message, createdAt: Date.now() });
         res.status(201).json({ ok: true });
     };
-    return { catalogSummary, listChapters, listPractice, listQuestions, listReports, create, update, importCsv, answer, report };
+    return { catalogSummary, listChapters, listPractice, practiceAnswers, listQuestions, listReports, create, update, importCsv, answer, report };
 }

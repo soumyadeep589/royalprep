@@ -9,7 +9,7 @@ The table describes the target contract. The current prototype uses `/api`, not 
 | Public CMS | GET /public/site, /public/pages/:slug, /public/course, /public/chapters/:slug | Published only, ETag, metadata and 404 |
 | Public tools | GET /public/tools, /public/guide, /public/exam-dates; POST /tools/eligibility, /tools/planner | Validated inputs, versioned facts and calculation rules |
 | Free learning | GET /public/radio, /public/flashcards, /quizzes/today | Explicit free access, five-question quiz sitting |
-| Student auth | POST /auth/otp/request, /auth/otp/verify; GET /auth/session | Local demo returns an expiring OTP only in development; production delivery provider, refresh and revocation workflows remain future work |
+| Student auth | POST /auth/otp/request, /auth/otp/verify; GET /auth/session | Development logs an expiring code to the backend console, not the response; production delivery provider, refresh and revocation workflows remain future work |
 | Staff auth | POST /admin/auth/login, /admin/auth/totp, /admin/auth/refresh, /admin/auth/logout | Separate password-based staff session with mandatory second-factor enrollment and recovery |
 | Profile | GET/PATCH /me; GET /me/sessions; DELETE /me/sessions/:id; POST /me/export, /me/delete | Owned preferences, consent and auditable data workflows |
 | Study | GET /dashboard, /chapters, /chapters/:id/notes; PUT /chapters/:id/progress | Published revisions, access state and stable anchors |

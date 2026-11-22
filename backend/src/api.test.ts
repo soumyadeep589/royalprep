@@ -7,9 +7,11 @@ import request from 'supertest'
 import { newDb } from 'pg-mem'
 import { createApp } from './app.js'
 import { migrateLegacyReports, migrateLegacySets } from './services/legacyMigration.js'
+import { consoleVerificationEmail } from './services/verificationEmail.js'
 
 const question = { chapter: 'Anatomy', published: true, stem: 'Pick the right answer', options: ['A', 'B', 'C', 'D'], correct: 1, explanation: 'B is correct.', source: 'Original' }
 const adminEmail = 'admin@example.com'
+const verificationEmail = { generateCode: () => '123456', sendCode: async () => {} }
 
 type ApiConfig = Omit<Parameters<typeof createApp>[0], 'postgres'>
 
@@ -17,24 +19,25 @@ async function createTestApi(t: TestContext, config: ApiConfig) {
   const db = newDb()
   db.public.registerFunction({ name: 'jsonb_typeof', args: ['jsonb'], returns: 'text', implementation: value => Array.isArray(value) ? 'array' : typeof value })
   db.public.registerFunction({ name: 'jsonb_array_length', args: ['jsonb'], returns: 'integer', implementation: value => value.length })
-  for (const migration of ['001_questions.sql', '002_hero.sql', '003_study_plans.sql', '004_custom_attempts.sql', '005_flashcards.sql', '006_student_accounts.sql']) {
+  for (const migration of ['001_questions.sql', '002_hero.sql', '003_study_plans.sql', '004_custom_attempts.sql', '005_flashcards.sql', '006_student_accounts.sql', '007_chapters.sql', '008_student_soft_deletion.sql', '009_chapter_publications.sql', '010_practice_answers.sql']) {
     db.public.none(await readFile(new URL(`../migrations/${migration}`, import.meta.url), 'utf8'))
   }
   const { Pool } = db.adapters.createPg()
   const pool = new Pool()
   t.after(async () => { await pool.end() })
-  const makeApi = (overrides: Partial<ApiConfig> = {}) => request(createApp({ ...config, ...overrides, postgres: pool }))
+  const makeApi = (overrides: Partial<ApiConfig> = {}) => request(createApp({ verificationEmail, ...config, ...overrides, postgres: pool }))
   return { api: makeApi(), makeApi, pool }
 }
 
 async function loginAdmin(api: ReturnType<typeof request>) {
   const otp = await api.post('/api/admin/otp/request').send({ password: 'test-password-long' })
-  return api.post('/api/admin/login').send({ challenge: otp.body.challenge, code: '000000' })
+  return api.post('/api/admin/login').send({ challenge: otp.body.challenge, code: '123456' })
 }
 
 async function signInStudent(api: ReturnType<typeof request>, email = 'student@example.com') {
   const requested = await api.post('/api/auth/otp/request').send({ email })
-  const verified = await api.post('/api/auth/otp/verify').send({ email, code: requested.body.demoOtp })
+  assert.equal(requested.status, 200)
+  const verified = await api.post('/api/auth/otp/verify').send({ email, code: '123456' })
   assert.equal(verified.status, 200)
   return { Authorization: 'Bearer ' + verified.body.token }
 }
@@ -42,6 +45,88 @@ async function signInStudent(api: ReturnType<typeof request>, email = 'student@e
 test('health checks PostgreSQL and identifies it as the application database', async t => {
   const { api } = await createTestApi(t, { adminPassword: 'test-password-long', secret: 'secret'.repeat(10) })
   assert.deepEqual((await api.get('/api/health')).body, { ok: true, storage: 'postgresql' })
+})
+
+test('chapter publication migration records only the known live revision', async () => {
+  const db = newDb()
+  for (const migration of ['006_student_accounts.sql', '007_chapters.sql']) {
+    db.public.none(await readFile(new URL(`../migrations/${migration}`, import.meta.url), 'utf8'))
+  }
+  db.public.none("INSERT INTO chapter_documents (id, current_revision, draft_revision, published_revision) VALUES ('chapter', 2, 2, 1)")
+  db.public.none(`INSERT INTO chapter_revisions (chapter_id, revision, content) VALUES ('chapter', 1, '{}'), ('chapter', 2, '{}')`)
+  db.public.none(await readFile(new URL('../migrations/009_chapter_publications.sql', import.meta.url), 'utf8'))
+  const rows = db.public.many('SELECT revision, published_at FROM chapter_publications')
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].revision, 1)
+  assert.equal(rows[0].published_at, null)
+})
+
+test('soft deletion retains records and denies all sessions and subsequent sign-in', async t => {
+  const { api, makeApi, pool } = await createTestApi(t, { adminPassword: 'test-password-long', secret: 'secret'.repeat(10), dummyOtpEnabled: true })
+  const student = await signInStudent(api)
+  const anotherProcess = makeApi()
+  const otherSession = await signInStudent(anotherProcess)
+  const other = await signInStudent(api, 'other@example.com')
+  await anotherProcess.post('/api/auth/otp/request').send({ email: 'student@example.com' })
+  const card = await api.post('/api/student/flashcards').set(student).send({ chapter: 'Anatomy', front: 'Question', back: 'Answer' })
+  assert.equal(card.status, 201)
+  assert.equal((await api.post('/api/auth/delete').send({ confirmation: 'DELETE' })).status, 401)
+  assert.equal((await api.post('/api/auth/delete').set(student).send({ confirmation: 'delete' })).status, 422)
+  assert.equal((await api.post('/api/auth/delete').set(student).send({ confirmation: 'DELETE' })).status, 200)
+  assert.equal((await api.get('/api/auth/session').set(student)).status, 401)
+  assert.equal((await anotherProcess.get('/api/auth/session').set(otherSession)).status, 401)
+  assert.equal((await anotherProcess.post('/api/auth/otp/verify').send({ email: 'student@example.com', code: '123456' })).status, 403)
+  assert.equal((await api.get('/api/student/flashcards').set(other)).status, 200)
+  assert.equal((await pool.query('SELECT * FROM student_flashcards WHERE owner_email = $1', ['student@example.com'])).rows.length, 1)
+  assert.notEqual((await pool.query('SELECT deleted_at FROM student_accounts WHERE email = $1', ['student@example.com'])).rows[0].deleted_at, null)
+  await api.post('/api/auth/otp/request').send({ email: 'student@example.com' })
+  assert.equal((await api.post('/api/auth/otp/verify').send({ email: 'student@example.com', code: '123456' })).status, 403)
+})
+
+test('chapter drafts stay private and reading progress is owned and versioned', async t => {
+  const { api, makeApi } = await createTestApi(t, { adminPassword: 'test-password-long', secret: 'secret'.repeat(10), adminEmail, dummyOtpEnabled: true, chapterNotesEnabled: true })
+  const admin = { Authorization: 'Bearer ' + (await loginAdmin(api)).body.token }
+  const student = await signInStudent(api)
+  const disabled = makeApi({ chapterNotesEnabled: false })
+  const disabledStudent = await signInStudent(disabled, 'disabled@example.com')
+  assert.equal((await disabled.get('/api/student/chapters').set(disabledStudent)).status, 503)
+  const other = await signInStudent(api, 'other@example.com')
+  const sectionId = randomUUID()
+  const content = { title: 'Anatomy', practiceChapter: 'Anatomy', sections: [{ id: sectionId, title: 'Introduction', body: 'Approved content.' }] }
+  assert.equal((await api.post('/api/admin/chapters').send(content)).status, 401)
+  assert.equal((await api.post('/api/admin/chapters').set(admin).send({ ...content, sections: [content.sections[0], content.sections[0]] })).status, 422)
+  const created = await api.post('/api/admin/chapters').set(admin).send(content)
+  assert.equal(created.status, 201)
+  const id = created.body.id as string
+  assert.deepEqual((await api.get('/api/student/chapters').set(student)).body, [])
+  assert.equal((await api.get(`/api/student/chapters/${id}`).set(student)).status, 404)
+  assert.equal((await api.post(`/api/admin/chapters/${id}/publish`).set(admin).send({ expectedRevision: 1 })).status, 200)
+  assert.equal((await api.get('/api/student/chapters')).status, 401)
+  assert.equal((await api.get('/api/student/chapters').set(student)).body[0].title, 'Anatomy')
+  const progress = { expectedVersion: 0, revision: 1, sectionId }
+  assert.equal((await api.put(`/api/student/chapters/${id}/progress`).set(student).send(progress)).body.version, 1)
+  assert.ok((await api.get('/api/student/chapters').set(student)).body[0].lastReadAt)
+  assert.equal((await api.get('/api/student/chapters').set(other)).body[0].lastReadAt, null)
+  assert.equal((await api.put(`/api/student/chapters/${id}/progress`).set(student).send(progress)).status, 409)
+  assert.equal((await api.get(`/api/student/chapters/${id}`).set(other)).body.progress, null)
+  assert.equal((await api.put(`/api/student/chapters/${id}/progress`).set(other).send({ ...progress, sectionId: randomUUID() })).status, 404)
+  const updated = { ...content, title: 'Revised anatomy' }
+  assert.equal((await api.put(`/api/admin/chapters/${id}/draft`).set(admin).send({ expectedRevision: 1, content: updated })).body.revision, 2)
+  assert.equal((await api.put(`/api/admin/chapters/${id}/draft`).set(admin).send({ expectedRevision: 1, content })).status, 409)
+  assert.equal((await api.get(`/api/student/chapters/${id}`).set(student)).body.content.title, 'Anatomy')
+  assert.equal((await api.post(`/api/admin/chapters/${id}/publish`).set(admin).send({ expectedRevision: 2 })).status, 200)
+  assert.equal((await api.put(`/api/student/chapters/${id}/progress`).set(student).send({ ...progress, expectedVersion: 1 })).status, 409)
+  assert.equal((await api.put(`/api/student/chapters/${id}/progress`).set(student).send({ ...progress, expectedVersion: 1, revision: 2 })).body.version, 2)
+  assert.equal((await api.put(`/api/admin/chapters/${id}/draft`).set(admin).send({ expectedRevision: 2, content: { ...content, title: 'Unpublished draft' } })).body.revision, 3)
+  const restorePath = `/api/admin/chapters/${id}/restore`
+  assert.equal((await api.post(restorePath).send({ expectedRevision: 3, sourceRevision: 1 })).status, 401)
+  assert.equal((await api.post(restorePath).set(admin).send({ expectedRevision: 3, sourceRevision: 3 })).status, 404)
+  assert.equal((await api.post(restorePath).set(admin).send({ expectedRevision: 2, sourceRevision: 1 })).status, 409)
+  assert.equal((await api.post(restorePath).set(admin).send({ expectedRevision: 3, sourceRevision: 1 })).body.revision, 4)
+  assert.equal((await api.get(`/api/student/chapters/${id}`).set(student)).body.content.title, 'Anatomy')
+  const history = (await api.get(`/api/admin/chapters/${id}`).set(admin)).body.history
+  assert.deepEqual(history.map((entry: { revision: number }) => entry.revision), [4, 2, 1])
+  assert.equal(history[0].sourceRevision, 1)
 })
 
 test('custom mocks freeze questions, protect ownership, score once and enforce deadlines', async t => {
@@ -104,6 +189,64 @@ test('mistakes show owned incorrect mock answers and clear when answered correct
   assert.equal((await api.get('/api/student/mistakes').set(student)).body.length, 0)
 })
 
+test('practice answers persist per student and update mistakes without accepting stale questions', async t => {
+  const { api, makeApi } = await createTestApi(t, { adminPassword: 'test-password-long', secret: 'secret'.repeat(10), adminEmail, dummyOtpEnabled: true })
+  const admin = { Authorization: 'Bearer ' + (await loginAdmin(api)).body.token }
+  const student = await signInStudent(api)
+  const other = await signInStudent(api, 'other@example.com')
+  const created = (await api.post('/api/admin/questions').set(admin).send(question)).body
+  const path = `/api/practice/questions/${created.id}/answer`
+  assert.equal((await api.get('/api/practice/answers')).status, 401)
+  assert.deepEqual((await api.get('/api/practice/answers').set(other)).body, [])
+  assert.equal((await api.post(path).set(student).send({ version: 1, option: 0 })).body.isCorrect, false)
+  const answer = (await api.get('/api/practice/answers').set(student)).body[0]
+  assert.equal(answer.questionId, created.id)
+  assert.equal(answer.questionVersion, 1)
+  assert.equal(answer.selected, 0)
+  assert.equal(answer.isCorrect, false)
+  assert.equal((await api.get('/api/student/mistakes').set(student)).body[0].attemptId, null)
+  assert.deepEqual((await api.get('/api/student/mistakes').set(other)).body, [])
+  const restarted = makeApi()
+  const newSession = await signInStudent(restarted)
+  assert.equal((await restarted.get('/api/practice/answers').set(newSession)).body[0].selected, 0)
+  assert.equal((await api.post(path).set(student).send({ version: 1, option: 1 })).body.isCorrect, true)
+  assert.deepEqual((await api.get('/api/student/mistakes').set(student)).body, [])
+  await api.put(`/api/admin/questions/${created.id}`).set(admin).send({ ...created, explanation: 'Revised explanation.' })
+  assert.equal((await api.post(path).set(student).send({ version: 1, option: 0 })).status, 409)
+  assert.equal((await api.get('/api/practice/answers').set(student)).body[0].questionVersion, 1)
+  assert.equal((await api.post(path).set(student).send({ version: 2, option: 0 })).body.isCorrect, false)
+  assert.equal((await api.get('/api/practice/answers').set(student)).body[0].explanation, 'Revised explanation.')
+})
+
+test('mistakes merge practice and mock answers in time order', async t => {
+  const { api } = await createTestApi(t, { adminPassword: 'test-password-long', secret: 'secret'.repeat(10), adminEmail, dummyOtpEnabled: true })
+  const admin = { Authorization: 'Bearer ' + (await loginAdmin(api)).body.token }
+  const student = await signInStudent(api)
+  const created = (await api.post('/api/admin/questions').set(admin).send(question)).body
+  const realNow = Date.now
+  let now = realNow()
+  Date.now = () => now
+  try {
+    const takeIncorrectMock = async () => {
+      const start = (await api.post('/api/student/attempts').set(student).send({ requestId: randomUUID(), chapters: ['Anatomy'], count: 1, durationMinutes: 5 })).body
+      await api.put(`/api/student/attempts/${start.id}/answers/${created.id}`).set(student).send({ expectedVersion: 1, option: 0 })
+      assert.equal((await api.post(`/api/student/attempts/${start.id}/submit`).set(student).send({ expectedVersion: 2 })).status, 200)
+    }
+    await takeIncorrectMock()
+    now += 1000
+    await api.post(`/api/practice/questions/${created.id}/answer`).set(student).send({ version: 1, option: 1 })
+    assert.deepEqual((await api.get('/api/student/mistakes').set(student)).body, [])
+    now += 1000
+    await takeIncorrectMock()
+    assert.equal((await api.get('/api/student/mistakes').set(student)).body.length, 1)
+    await api.post(`/api/practice/questions/${created.id}/answer`).set(student).send({ version: 1, option: 1 })
+    assert.equal((await api.get('/api/student/mistakes').set(student)).body.length, 1)
+    now += 1000
+    await api.post(`/api/practice/questions/${created.id}/answer`).set(student).send({ version: 1, option: 1 })
+    assert.deepEqual((await api.get('/api/student/mistakes').set(student)).body, [])
+  } finally { Date.now = realNow }
+})
+
 test('personal flashcard reviews are owned, versioned and idempotent', async t => {
   const { api } = await createTestApi(t, { adminPassword: 'test-password-long', secret: 'secret'.repeat(10), dummyOtpEnabled: true })
   const student = await signInStudent(api)
@@ -140,6 +283,11 @@ test('study plans enforce ownership, validation and optimistic edits', async t =
   const updated = { ...plan, tasks: [{ ...plan.tasks[0], done: true }] }
   assert.equal((await api.put('/api/student/study-plan').set(student).send({ expectedVersion: 1, plan: updated })).body.version, 2)
   assert.equal((await api.get('/api/student/study-plan').set(student)).body.plan.tasks[0].done, true)
+  const chosenDays = { ...updated, studyDays: [1, 2, 3, 4] }
+  assert.equal((await api.put('/api/student/study-plan').set(student).send({ expectedVersion: 2, plan: { ...chosenDays, studyDays: [1, 1, 3, 4] } })).status, 422)
+  assert.equal((await api.put('/api/student/study-plan').set(student).send({ expectedVersion: 2, plan: { ...chosenDays, studyDays: [1, 2] } })).status, 422)
+  assert.equal((await api.put('/api/student/study-plan').set(student).send({ expectedVersion: 2, plan: chosenDays })).status, 200)
+  assert.deepEqual((await api.get('/api/student/study-plan').set(student)).body.plan.studyDays, [1, 2, 3, 4])
 })
 
 test('standalone questions support editing, practice, reports and version conflicts', async t => {
@@ -230,28 +378,29 @@ test('legacy questions and reports retain stable identity and report context', (
   assert.throws(() => migrateLegacyReports([{ id: 'report-id', setId: 'missing', questionIndex: 0, setVersion: 1, questionStem: 'Original', message: 'Review', createdAt: 123 }], new Set()))
 })
 
-test('student demo OTP signs up or signs in with any six digits and is single-use', async t => {
+test('student OTP verifies only the issued code and is single-use', async t => {
   const { api, pool } = await createTestApi(t, { adminPassword: 'test-password-long', secret: 'secret'.repeat(10), adminEmail, dummyOtpEnabled: true })
   assert.equal((await api.post('/api/auth/otp/verify').send({ email: 'student@example.com', code: '000000' })).status, 401)
   const requested = await api.post('/api/auth/otp/request').send({ email: ' Student@Example.com ' })
   assert.equal(requested.status, 200)
-  assert.match(requested.body.demoOtp, /^\d{6}$/)
+  assert.equal(requested.body.demoOtp, undefined)
   assert.equal(requested.headers['cache-control'], 'no-store')
 
   assert.equal((await api.post('/api/auth/otp/verify').send({ email: 'other@example.com', code: '000000' })).status, 401)
   assert.equal((await api.post('/api/auth/otp/verify').send({ email: 'student@example.com', code: '12345a' })).status, 422)
-  const verified = await api.post('/api/auth/otp/verify').send({ email: 'student@example.com', code: '000000' })
+  assert.equal((await api.post('/api/auth/otp/verify').send({ email: 'student@example.com', code: '000000' })).status, 401)
+  const verified = await api.post('/api/auth/otp/verify').send({ email: 'student@example.com', code: '123456' })
   assert.equal(verified.status, 200)
   assert.deepEqual(verified.body.user, { email: 'student@example.com' })
   await api.post('/api/auth/otp/request').send({ email: 'STUDENT@example.com' })
-  const returning = await api.post('/api/auth/otp/verify').send({ email: 'student@example.com', code: '999999' })
+  const returning = await api.post('/api/auth/otp/verify').send({ email: 'student@example.com', code: '123456' })
   assert.equal(returning.status, 200)
   assert.equal((await pool.query('SELECT count(*)::int AS count FROM student_accounts')).rows[0].count, 1)
 
   const studentAuth = { Authorization: 'Bearer ' + verified.body.token }
   assert.equal((await api.get('/api/auth/session').set(studentAuth)).body.user.email, 'student@example.com')
   assert.equal((await api.get('/api/admin/questions').set(studentAuth)).status, 401)
-  assert.equal((await api.post('/api/auth/otp/verify').send({ email: 'student@example.com', code: requested.body.demoOtp })).status, 401)
+  assert.equal((await api.post('/api/auth/otp/verify').send({ email: 'student@example.com', code: '123456' })).status, 401)
 
   const adminLogin = await loginAdmin(api)
   assert.equal((await api.get('/api/auth/session').set({ Authorization: 'Bearer ' + adminLogin.body.token })).status, 401)
@@ -269,6 +418,53 @@ test('student demo OTP signs up or signs in with any six digits and is single-us
   assert.equal((await api.get('/api/admin/session').set(adminAuth)).status, 401)
 })
 
+test('verification codes are delivered, replaced, and locked after repeated failures', async t => {
+  const sent: { email: string; code: string }[] = []
+  let next = 111111
+  const service = { generateCode: () => String(next++), sendCode: async (email: string, code: string) => { sent.push({ email, code }) } }
+  const { api } = await createTestApi(t, { adminPassword: 'test-password-long', secret: 'secret'.repeat(10), adminEmail, dummyOtpEnabled: true, verificationEmail: service })
+  const first = await api.post('/api/auth/otp/request').send({ email: 'student@example.com' })
+  assert.equal(first.status, 200)
+  assert.deepEqual(sent[0], { email: 'student@example.com', code: '111111' })
+  assert.equal(JSON.stringify(first.body).includes('111111'), false)
+  await api.post('/api/auth/otp/request').send({ email: 'student@example.com' })
+  assert.equal((await api.post('/api/auth/otp/verify').send({ email: 'student@example.com', code: '111111' })).status, 401)
+  assert.equal((await api.post('/api/auth/otp/verify').send({ email: 'student@example.com', code: '111112' })).status, 200)
+  await api.post('/api/auth/otp/request').send({ email: 'student@example.com' })
+  for (let i = 0; i < 5; i++) assert.equal((await api.post('/api/auth/otp/verify').send({ email: 'student@example.com', code: '000000' })).status, 401)
+  assert.equal((await api.post('/api/auth/otp/verify').send({ email: 'student@example.com', code: '111113' })).status, 401)
+  const adminOtp = await api.post('/api/admin/otp/request').send({ password: 'test-password-long' })
+  assert.deepEqual(sent[3], { email: adminEmail, code: '111114' })
+  for (let i = 0; i < 5; i++) assert.equal((await api.post('/api/admin/login').send({ challenge: adminOtp.body.challenge, code: '000000' })).status, 401)
+  assert.equal((await api.post('/api/admin/login').send({ challenge: adminOtp.body.challenge, code: '111114' })).status, 401)
+})
+
+test('console email service logs a generated code without returning it to the client', async t => {
+  const { api } = await createTestApi(t, { adminPassword: 'test-password-long', secret: 'secret'.repeat(10), dummyOtpEnabled: true, verificationEmail: consoleVerificationEmail })
+  const original = console.log
+  let log = ''
+  console.log = (message: string) => { log = message }
+  let responseBody: unknown
+  let status = 0
+  try {
+    const response = await api.post('/api/auth/otp/request').send({ email: 'student@example.com' })
+    responseBody = response.body; status = response.status
+  }
+  finally { console.log = original }
+  const code = /^Verification code for student@example\.com: (\d{6})$/.exec(log)?.[1]
+  assert.ok(code)
+  assert.equal(status, 200)
+  assert.equal(JSON.stringify(responseBody).includes(code), false)
+  assert.equal((await api.post('/api/auth/otp/verify').send({ email: 'student@example.com', code })).status, 200)
+})
+
+test('a delivery failure does not leave a usable student challenge', async t => {
+  const service = { generateCode: () => '123456', sendCode: async () => { throw Error('Delivery unavailable') } }
+  const { api } = await createTestApi(t, { adminPassword: 'test-password-long', secret: 'secret'.repeat(10), dummyOtpEnabled: true, verificationEmail: service })
+  assert.equal((await api.post('/api/auth/otp/request').send({ email: 'student@example.com' })).status, 500)
+  assert.equal((await api.post('/api/auth/otp/verify').send({ email: 'student@example.com', code: '123456' })).status, 401)
+})
+
 test('admin requires password and a single-use email challenge', async t => {
   const secret = 'secret'.repeat(10)
   const { api, makeApi } = await createTestApi(t, { adminPassword: 'test-password-long', secret, adminEmail, dummyOtpEnabled: true })
@@ -278,8 +474,10 @@ test('admin requires password and a single-use email challenge', async t => {
   assert.equal((await api.post('/api/admin/login').send({ password: 'test-password-long', code: '123456' })).status, 422)
   const otp = await api.post('/api/admin/otp/request').send({ password: 'test-password-long' })
   assert.equal(otp.status, 200)
+  assert.equal(otp.body.demoOtp, undefined)
   assert.equal((await api.post('/api/admin/login').send({ challenge: otp.body.challenge, code: '12345a' })).status, 422)
-  const login = await api.post('/api/admin/login').send({ challenge: otp.body.challenge, code: '000000' })
+  assert.equal((await api.post('/api/admin/login').send({ challenge: otp.body.challenge, code: '000000' })).status, 401)
+  const login = await api.post('/api/admin/login').send({ challenge: otp.body.challenge, code: '123456' })
   assert.equal(login.status, 200)
   assert.equal((await api.post('/api/admin/login').send({ challenge: otp.body.challenge, code: '999999' })).status, 401)
   assert.equal((await api.get('/api/admin/session').set({ Authorization: 'Bearer ' + login.body.token + '.extra' })).status, 401)
@@ -317,11 +515,11 @@ test('student and admin demo challenges expire', async t => {
   const config = { adminPassword: 'test-password-long', secret: 'secret'.repeat(10), dummyOtpEnabled: true }
   const { makeApi } = await createTestApi(t, config)
   const expiredApi = makeApi()
-  const expired = await expiredApi.post('/api/auth/otp/request').send({ email: 'expired@example.com' })
+  await expiredApi.post('/api/auth/otp/request').send({ email: 'expired@example.com' })
   const realNow = Date.now
   Date.now = () => realNow() + 6 * 60_000
   try {
-    assert.equal((await expiredApi.post('/api/auth/otp/verify').send({ email: 'expired@example.com', code: expired.body.demoOtp })).status, 401)
+    assert.equal((await expiredApi.post('/api/auth/otp/verify').send({ email: 'expired@example.com', code: '123456' })).status, 401)
   } finally {
     Date.now = realNow
   }

@@ -3,11 +3,12 @@ import { z } from 'zod'
 import { questionInputSchema } from '../models/question.js'
 import { createQuestionService, id } from '../services/questionService.js'
 import { parseQuestionCsv } from '../services/csvImport.js'
+import { createPracticeRepository, PracticeConflict, PracticeNotFound } from '../repositories/practiceRepository.js'
 
 const answerInput = z.object({ version: z.number().int().positive(), option: z.number().int().min(0).max(3) })
 const reportInput = z.object({ version: z.number().int().positive(), message: z.string().trim().min(1).max(500) })
 
-export function createQuestionController(service: ReturnType<typeof createQuestionService>) {
+export function createQuestionController(service: ReturnType<typeof createQuestionService>, practice: ReturnType<typeof createPracticeRepository>) {
   const listChapters: RequestHandler = async (_req, res) => {
     const questions = await service.listQuestions(true)
     const counts = new Map<string, number>()
@@ -27,6 +28,10 @@ export function createQuestionController(service: ReturnType<typeof createQuesti
     })))
   }
   const listQuestions: RequestHandler = async (_req, res) => { res.json(await service.listQuestions()) }
+  const practiceAnswers: RequestHandler = async (_req, res) => {
+    const { email } = res.locals.student as { email: string }
+    res.json(await practice.list(email))
+  }
   const listReports: RequestHandler = async (_req, res) => { res.json(await service.listReports()) }
   const create: RequestHandler = async (req, res) => {
     const parsed = questionInputSchema.safeParse(req.body)
@@ -56,10 +61,14 @@ export function createQuestionController(service: ReturnType<typeof createQuesti
   const answer: RequestHandler = async (req, res) => {
     const parsed = answerInput.safeParse(req.body)
     if (!parsed.success) { res.status(422).json({ error: 'Invalid practice answer.' }); return }
-    const question = await service.readQuestion(String(req.params.id))
-    if (!question?.published) { res.status(404).json({ error: 'Question not found.' }); return }
-    if (question.version !== parsed.data.version) { res.status(409).json({ error: 'Question changed; reload practice.' }); return }
-    res.set('Cache-Control', 'no-store').json({ correct: question.correct, explanation: question.explanation, isCorrect: question.correct === parsed.data.option })
+    const { email } = res.locals.student as { email: string }
+    try {
+      res.set('Cache-Control', 'no-store').json(await practice.answer(email, String(req.params.id), parsed.data.version, parsed.data.option))
+    } catch (error) {
+      if (error instanceof PracticeNotFound) { res.status(404).json({ error: 'Question not found.' }); return }
+      if (error instanceof PracticeConflict) { res.status(409).json({ error: 'Question changed; reload practice.' }); return }
+      throw error
+    }
   }
   const report: RequestHandler = async (req, res) => {
     const parsed = reportInput.safeParse(req.body)
@@ -70,5 +79,5 @@ export function createQuestionController(service: ReturnType<typeof createQuesti
     await service.createReport({ id: id(), questionId: question.id, questionVersion: question.version, questionStem: question.stem, message: parsed.data.message, createdAt: Date.now() })
     res.status(201).json({ ok: true })
   }
-  return { catalogSummary, listChapters, listPractice, listQuestions, listReports, create, update, importCsv, answer, report }
+  return { catalogSummary, listChapters, listPractice, practiceAnswers, listQuestions, listReports, create, update, importCsv, answer, report }
 }

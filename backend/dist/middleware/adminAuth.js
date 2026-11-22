@@ -6,13 +6,13 @@ const equal = (a, b) => {
     const left = Buffer.from(a), right = Buffer.from(b);
     return left.length === right.length && timingSafeEqual(left, right);
 };
-export function createAdminAuth(adminPassword, adminEmail, enabled) {
+export function createAdminAuth(adminPassword, adminEmail, enabled, emailService) {
     const email = normalizeEmail(adminEmail);
     if (adminEmail && !email)
         throw Error('ADMIN_EMAIL must be a valid email address.');
     const challenges = new Map();
     const sessions = new Map();
-    const requestOtp = (req, res) => {
+    const requestOtp = async (req, res) => {
         if (!enabled || !email) {
             res.status(503).json({ error: 'Admin email sign-in is unavailable.' });
             return;
@@ -22,12 +22,20 @@ export function createAdminAuth(adminPassword, adminEmail, enabled) {
             return;
         }
         const now = Date.now();
-        for (const [token, expiry] of challenges)
-            if (expiry <= now)
+        for (const [token, challenge] of challenges)
+            if (challenge.expiresAt <= now)
                 challenges.delete(token);
         const challenge = randomBytes(32).toString('base64url');
-        challenges.set(challenge, now + challengeLifetime);
-        res.json({ challenge, message: 'Development only: any six-digit code works. No email was sent.', demoOtp: '123456', expiresInSeconds: challengeLifetime / 1000 });
+        const value = { expiresAt: now + challengeLifetime, code: emailService.generateCode(), attempts: 0 };
+        challenges.set(challenge, value);
+        try {
+            await emailService.sendCode(email, value.code);
+        }
+        catch (error) {
+            challenges.delete(challenge);
+            throw error;
+        }
+        res.json({ challenge, message: 'Your verification code is available in the server console.', expiresInSeconds: challengeLifetime / 1000 });
     };
     const login = (req, res) => {
         if (!enabled || !email) {
@@ -39,12 +47,20 @@ export function createAdminAuth(adminPassword, adminEmail, enabled) {
             res.status(422).json({ error: 'Provide a valid challenge and six-digit code.' });
             return;
         }
-        const expiry = challenges.get(challenge);
-        challenges.delete(challenge);
-        if (!expiry || expiry <= Date.now()) {
+        const value = challenges.get(challenge);
+        if (!value || value.expiresAt <= Date.now()) {
+            challenges.delete(challenge);
             res.status(401).json({ error: 'The code is missing or expired. Request a new code.' });
             return;
         }
+        if (!equal(value.code, code)) {
+            value.attempts++;
+            if (value.attempts >= 5)
+                challenges.delete(challenge);
+            res.status(401).json({ error: 'Invalid verification code. Request a new code if needed.' });
+            return;
+        }
+        challenges.delete(challenge);
         const now = Date.now();
         for (const [token, sessionExpiry] of sessions)
             if (sessionExpiry <= now)

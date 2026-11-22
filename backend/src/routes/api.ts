@@ -1,4 +1,4 @@
-import { Router } from 'express'
+import { Router, type RequestHandler } from 'express'
 import { rateLimit } from 'express-rate-limit'
 import type { Pool } from 'pg'
 import { createAdminAuth } from '../middleware/adminAuth.js'
@@ -13,17 +13,28 @@ import { createAttemptController } from '../controllers/attemptController.js'
 import { createFlashcardRepository } from '../repositories/flashcardRepository.js'
 import { createFlashcardController } from '../controllers/flashcardController.js'
 import { createQuestionService } from '../services/questionService.js'
+import { createChapterRepository } from '../repositories/chapterRepository.js'
+import { createChapterController } from '../controllers/chapterController.js'
+import { consoleVerificationEmail, type VerificationEmailService } from '../services/verificationEmail.js'
+import { createPracticeRepository } from '../repositories/practiceRepository.js'
 
-export function createApiRouter(config: { adminPassword: string; secret: string; adminEmail?: string; dummyOtpEnabled?: boolean; postgres: Pool }) {
+export function createApiRouter(config: { adminPassword: string; secret: string; adminEmail?: string; dummyOtpEnabled?: boolean; chapterNotesEnabled?: boolean; verificationEmail?: VerificationEmailService; postgres: Pool }) {
   const router = Router()
   const service = createQuestionService(config.postgres)
-  const questions = createQuestionController(service)
+  const practice = createPracticeRepository(config.postgres)
+  const questions = createQuestionController(service, practice)
   const hero = createHeroController(createHeroRepository(config.postgres))
   const plans = createStudyPlanController(createStudyPlanRepository(config.postgres))
-  const attempts = createAttemptController(createAttemptRepository(config.postgres), service)
+  const attempts = createAttemptController(createAttemptRepository(config.postgres), service, practice)
   const flashcards = createFlashcardController(createFlashcardRepository(config.postgres))
-  const auth = createAdminAuth(config.adminPassword, config.adminEmail, config.dummyOtpEnabled ?? false)
-  const studentAuth = createDummyUserAuth(config.dummyOtpEnabled ?? false, config.postgres)
+  const chapters = createChapterController(createChapterRepository(config.postgres))
+  const emailService = config.verificationEmail ?? consoleVerificationEmail
+  const auth = createAdminAuth(config.adminPassword, config.adminEmail, config.dummyOtpEnabled ?? false, emailService)
+  const studentAuth = createDummyUserAuth(config.dummyOtpEnabled ?? false, config.postgres, emailService)
+  const requireChapterNotes: RequestHandler = (_req, res, next) => {
+    if (!config.chapterNotesEnabled) { res.status(503).json({ error: 'Chapter notes are not enabled.' }); return }
+    next()
+  }
 
   router.use(rateLimit({ windowMs: 60_000, limit: 180 }))
   router.use('/admin', (_req, res, next) => { res.set('Cache-Control', 'no-store'); next() })
@@ -35,6 +46,7 @@ export function createApiRouter(config: { adminPassword: string; secret: string;
   router.post('/auth/otp/verify', rateLimit({ windowMs: 15 * 60_000, limit: 10 }), studentAuth.verifyOtp)
   router.get('/auth/session', studentAuth.requireStudent, studentAuth.getSession)
   router.post('/auth/logout', studentAuth.requireStudent, studentAuth.logout)
+  router.post('/auth/delete', studentAuth.requireStudent, studentAuth.deleteAccount)
   router.use('/admin', auth.requireAdmin)
   router.get('/admin/session', (_req, res) => { res.json({ authenticated: true }) })
   router.post('/admin/logout', auth.logout)
@@ -51,10 +63,21 @@ export function createApiRouter(config: { adminPassword: string; secret: string;
   router.put('/admin/site/hero/draft', hero.saveDraft)
   router.post('/admin/site/hero/publish', hero.publish)
   router.post('/admin/site/hero/restore', hero.restore)
+  router.use('/admin/chapters', requireChapterNotes)
+  router.get('/admin/chapters', chapters.listAdmin)
+  router.post('/admin/chapters', chapters.create)
+  router.get('/admin/chapters/:id', chapters.getAdmin)
+  router.put('/admin/chapters/:id/draft', chapters.saveDraft)
+  router.post('/admin/chapters/:id/publish', chapters.publish)
+  router.post('/admin/chapters/:id/restore', chapters.restore)
   router.get('/public/site/hero', hero.publicHero)
   router.get('/public/catalog-summary', questions.catalogSummary)
   router.get('/public/chapters', questions.listChapters)
   router.use('/student', (_req, res, next) => { res.set('Cache-Control', 'no-store'); next() }, studentAuth.requireStudent)
+  router.use('/student/chapters', requireChapterNotes)
+  router.get('/student/chapters', chapters.listStudent)
+  router.get('/student/chapters/:id', chapters.readStudent)
+  router.put('/student/chapters/:id/progress', chapters.saveProgress)
   router.get('/student/study-plan', plans.read)
   router.put('/student/study-plan', plans.write)
   router.get('/student/attempts', attempts.list)
@@ -70,6 +93,7 @@ export function createApiRouter(config: { adminPassword: string; secret: string;
   router.delete('/student/flashcards/:id', flashcards.remove)
   router.use('/practice', (_req, res, next) => { res.set('Cache-Control', 'no-store'); next() }, studentAuth.requireStudent)
   router.get('/practice/questions', questions.listPractice)
+  router.get('/practice/answers', questions.practiceAnswers)
   router.post('/practice/questions/:id/answer', questions.answer)
   router.post('/practice/questions/:id/reports', rateLimit({ windowMs: 60_000, limit: 10, handler: (_req, res) => { res.status(429).json({ error: 'Too many reports. Please try again later.' }) } }), questions.report)
   return router

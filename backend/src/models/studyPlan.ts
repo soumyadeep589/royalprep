@@ -8,6 +8,7 @@ const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(value => {
 export const studyPlanSchema = z.object({
   targetDate: date,
   daysPerWeek: z.number().int().min(1).max(7),
+  studyDays: z.array(z.number().int().min(0).max(6)).min(1).max(7).optional(),
   hoursPerWeek: z.number().min(1).max(168),
   tasks: z.array(z.object({
     id: z.string().uuid(),
@@ -16,6 +17,8 @@ export const studyPlanSchema = z.object({
     dueDate: date,
     done: z.boolean(),
   }).strict()).max(500),
-}).strict().refine(plan => new Set(plan.tasks.map(task => task.id)).size === plan.tasks.length, 'Task IDs must be unique.')
+}).strict()
+  .refine(plan => new Set(plan.tasks.map(task => task.id)).size === plan.tasks.length, 'Task IDs must be unique.')
+  .refine(plan => !plan.studyDays || (new Set(plan.studyDays).size === plan.studyDays.length && plan.studyDays.length === plan.daysPerWeek), 'Study days must be unique and match days per week.')
 
 export type StudyPlan = z.infer<typeof studyPlanSchema>

@@ -7,22 +7,24 @@ import request from 'supertest'
 import { createApp } from './app.js'
 
 const adminEmail = 'admin@example.com'
+const verificationEmail = { generateCode: () => '123456', sendCode: async () => {} }
 
 async function loginAdmin(api: ReturnType<typeof request>) {
   const otp = await api.post('/api/admin/otp/request').send({ password: 'test-password-long' })
-  return api.post('/api/admin/login').send({ challenge: otp.body.challenge, code: '654321' })
+  return api.post('/api/admin/login').send({ challenge: otp.body.challenge, code: '123456' })
 }
 
 test('PostgreSQL flashcards and review events persist across requests', async () => {
   const db = newDb()
   db.public.none(await readFile(new URL('../migrations/005_flashcards.sql', import.meta.url), 'utf8'))
   db.public.none(await readFile(new URL('../migrations/006_student_accounts.sql', import.meta.url), 'utf8'))
+  db.public.none(await readFile(new URL('../migrations/008_student_soft_deletion.sql', import.meta.url), 'utf8'))
   const { Pool } = db.adapters.createPg()
   const pool = new Pool()
   try {
-    const api = request(createApp({ adminPassword: 'test-password-long', secret: 'secret'.repeat(10), postgres: pool, dummyOtpEnabled: true }))
+    const api = request(createApp({ adminPassword: 'test-password-long', secret: 'secret'.repeat(10), postgres: pool, dummyOtpEnabled: true, verificationEmail }))
     const otp = await api.post('/api/auth/otp/request').send({ email: 'student@example.com' })
-    const auth = { Authorization: 'Bearer ' + (await api.post('/api/auth/otp/verify').send({ email: 'student@example.com', code: otp.body.demoOtp })).body.token }
+    const auth = { Authorization: 'Bearer ' + (await api.post('/api/auth/otp/verify').send({ email: 'student@example.com', code: '123456' })).body.token }
     const card = (await api.post('/api/student/flashcards').set(auth).send({ chapter: 'Anatomy', front: 'Question', back: 'Answer' })).body
     const eventId = randomUUID()
     const review = { eventId, expectedVersion: 1, rating: 'hard' }
@@ -39,13 +41,14 @@ test('PostgreSQL custom mocks survive application restart', async () => {
   db.public.none(await readFile(new URL('../migrations/001_questions.sql', import.meta.url), 'utf8'))
   db.public.none(await readFile(new URL('../migrations/004_custom_attempts.sql', import.meta.url), 'utf8'))
   db.public.none(await readFile(new URL('../migrations/006_student_accounts.sql', import.meta.url), 'utf8'))
+  db.public.none(await readFile(new URL('../migrations/008_student_soft_deletion.sql', import.meta.url), 'utf8'))
   const { Pool } = db.adapters.createPg()
   const pool = new Pool()
   try {
-    const newApi = () => request(createApp({ adminPassword: 'test-password-long', secret: 'secret'.repeat(10), adminEmail, postgres: pool, dummyOtpEnabled: true }))
+    const newApi = () => request(createApp({ adminPassword: 'test-password-long', secret: 'secret'.repeat(10), adminEmail, postgres: pool, dummyOtpEnabled: true, verificationEmail }))
     const loginStudent = async (api: ReturnType<typeof request>) => {
       const otp = await api.post('/api/auth/otp/request').send({ email: 'student@example.com' })
-      return { Authorization: 'Bearer ' + (await api.post('/api/auth/otp/verify').send({ email: 'student@example.com', code: otp.body.demoOtp })).body.token }
+      return { Authorization: 'Bearer ' + (await api.post('/api/auth/otp/verify').send({ email: 'student@example.com', code: '123456' })).body.token }
     }
     const api = newApi()
     const admin = { Authorization: 'Bearer ' + (await loginAdmin(api)).body.token }
@@ -68,13 +71,14 @@ test('PostgreSQL study plans persist per student and reject stale versions', asy
   const db = newDb()
   db.public.none(await readFile(new URL('../migrations/003_study_plans.sql', import.meta.url), 'utf8'))
   db.public.none(await readFile(new URL('../migrations/006_student_accounts.sql', import.meta.url), 'utf8'))
+  db.public.none(await readFile(new URL('../migrations/008_student_soft_deletion.sql', import.meta.url), 'utf8'))
   const { Pool } = db.adapters.createPg()
   const pool = new Pool()
   try {
-    const app = () => request(createApp({ adminPassword: 'test-password-long', secret: 'secret'.repeat(10), postgres: pool, dummyOtpEnabled: true }))
+    const app = () => request(createApp({ adminPassword: 'test-password-long', secret: 'secret'.repeat(10), postgres: pool, dummyOtpEnabled: true, verificationEmail }))
     const api = app()
     const otp = await api.post('/api/auth/otp/request').send({ email: 'student@example.com' })
-    const student = { Authorization: 'Bearer ' + (await api.post('/api/auth/otp/verify').send({ email: 'student@example.com', code: otp.body.demoOtp })).body.token }
+    const student = { Authorization: 'Bearer ' + (await api.post('/api/auth/otp/verify').send({ email: 'student@example.com', code: '123456' })).body.token }
     const plan = { targetDate: '2027-06-01', daysPerWeek: 3, hoursPerWeek: 6, tasks: [] }
     assert.equal((await api.put('/api/student/study-plan').set(student).send({ expectedVersion: 0, plan })).status, 200)
     assert.equal((await api.put('/api/student/study-plan').set(student).send({ expectedVersion: 0, plan })).status, 409)
@@ -92,13 +96,15 @@ test('PostgreSQL-backed question API persists questions, versions and reports', 
   db.public.registerFunction({ name: 'jsonb_array_length', args: ['jsonb'], returns: 'integer', implementation: value => value.length })
   db.public.none(await readFile(new URL('../migrations/001_questions.sql', import.meta.url), 'utf8'))
   db.public.none(await readFile(new URL('../migrations/006_student_accounts.sql', import.meta.url), 'utf8'))
+  db.public.none(await readFile(new URL('../migrations/008_student_soft_deletion.sql', import.meta.url), 'utf8'))
+  db.public.none(await readFile(new URL('../migrations/010_practice_answers.sql', import.meta.url), 'utf8'))
   const { Pool } = db.adapters.createPg()
   const pool = new Pool()
   try {
-    const api = request(createApp({ adminPassword: 'test-password-long', secret: 'secret'.repeat(10), adminEmail, postgres: pool, dummyOtpEnabled: true }))
+    const api = request(createApp({ adminPassword: 'test-password-long', secret: 'secret'.repeat(10), adminEmail, postgres: pool, dummyOtpEnabled: true, verificationEmail }))
     const auth = { Authorization: 'Bearer ' + (await loginAdmin(api)).body.token }
     const otp = await api.post('/api/auth/otp/request').send({ email: 'student@example.com' })
-    const student = { Authorization: 'Bearer ' + (await api.post('/api/auth/otp/verify').send({ email: 'student@example.com', code: otp.body.demoOtp })).body.token }
+    const student = { Authorization: 'Bearer ' + (await api.post('/api/auth/otp/verify').send({ email: 'student@example.com', code: '123456' })).body.token }
     const payload = { chapter: 'Anatomy', published: true, stem: 'Pick the right answer', options: ['A', 'B', 'C', 'D'], correct: 1, explanation: 'B is correct.' }
     const created = await api.post('/api/admin/questions').set(auth).send(payload)
     assert.equal(created.status, 201)
@@ -123,7 +129,7 @@ test('hero drafts stay private and publications can be restored without overwrit
   const { Pool } = db.adapters.createPg()
   const pool = new Pool()
   try {
-    const api = request(createApp({ adminPassword: 'test-password-long', secret: 'secret'.repeat(10), adminEmail, postgres: pool, dummyOtpEnabled: true }))
+    const api = request(createApp({ adminPassword: 'test-password-long', secret: 'secret'.repeat(10), adminEmail, postgres: pool, dummyOtpEnabled: true, verificationEmail }))
     const auth = { Authorization: 'Bearer ' + (await loginAdmin(api)).body.token }
     const content = { eyebrow: 'Study', headline: 'Original headline', highlight: 'Part A', description: 'Study at your pace.', primaryLabel: 'Practice', primaryPath: '/practice', secondaryLabel: 'Sign in', secondaryPath: '/sign-in' }
     assert.equal((await api.get('/api/public/site/hero')).status, 404)
